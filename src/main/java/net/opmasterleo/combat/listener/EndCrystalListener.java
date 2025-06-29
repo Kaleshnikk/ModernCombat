@@ -8,6 +8,7 @@ import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.EnderCrystal;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -35,16 +36,45 @@ public class EndCrystalListener implements Listener {
             @Override
             public void onPacketReceiving(PacketEvent event) {
                 if (event.getPacketType() == PacketType.Play.Client.USE_ENTITY) {
+                    final Player player = event.getPlayer();
+                    final int entityId = event.getPacket().getIntegers().read(0);
+
                     Bukkit.getScheduler().runTask(Combat.getInstance(), () -> {
-                        Entity entity = event.getPacket().getEntityModifier(event).read(0);
+                        Entity entity = getEntityById(player.getWorld(), entityId);
                         if (entity != null && entity.getType() == EntityType.END_CRYSTAL) {
-                            Player player = event.getPlayer();
+                            Combat combat = Combat.getInstance();
+                            NewbieProtectionListener protection = combat.getNewbieProtectionListener();
+                            // Only block if the target is a player and attacker is protected
+                            boolean shouldBlock = false;
+                            if (protection != null && protection.isActuallyProtected(player)) {
+                                for (Entity nearby : entity.getNearbyEntities(4.0, 4.0, 4.0)) {
+                                    if (nearby instanceof Player target && !player.getUniqueId().equals(target.getUniqueId())) {
+                                        shouldBlock = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (shouldBlock) {
+                                event.setCancelled(true);
+                                if (protection != null) {
+                                    protection.sendBlockedMessage(player, protection.getCrystalBlockMessage());
+                                }
+                                return;
+                            }
                             Combat.getInstance().registerCrystalPlacer(entity, player);
                         }
                     });
                 }
             }
         });
+    }
+
+    // Helper to get entity by ID in a world (safe on main thread)
+    private Entity getEntityById(org.bukkit.World world, int id) {
+        for (Entity entity : world.getEntities()) {
+            if (entity.getEntityId() == id) return entity;
+        }
+        return null;
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -57,14 +87,15 @@ public class EndCrystalListener implements Listener {
         Entity damager = event.getDamager();
 
         if (damager.getType() == EntityType.END_CRYSTAL) {
-            handleCrystalDamage(damaged, damager);
+            if (handleCrystalDamageWithEvent(damaged, damager, event)) {
+                event.setCancelled(true);
+            }
         }
     }
 
-    private void handleCrystalDamage(Entity damaged, Entity damager) {
+    private boolean handleCrystalDamageWithEvent(Entity damaged, Entity damager, EntityDamageByEntityEvent event) {
         Player damagedPlayer = (damaged instanceof Player) ? (Player) damaged : null;
         Player placer = Combat.getInstance().getCrystalManager().getPlacer(damager);
-
         if (damagedPlayer != null) {
             if (placer != null) {
                 handleCombat(damagedPlayer, placer);
@@ -72,6 +103,7 @@ public class EndCrystalListener implements Listener {
                 linkCrystalByProximity(damager, damagedPlayer);
             }
         }
+        return false;
     }
 
     private void handleCombat(Player damagedPlayer, Player placer) {
@@ -106,5 +138,13 @@ public class EndCrystalListener implements Listener {
 
     public void registerCrystalPlacer(Entity crystal, Player placer) {
         Combat.getInstance().getCrystalManager().setPlacer(crystal, placer);
+    }
+
+    public Player resolveCrystalAttacker(EnderCrystal crystal, EntityDamageByEntityEvent event) {
+        Player placer = Combat.getInstance().getCrystalManager().getPlacer(crystal);
+        if (placer != null) return placer;
+        Entity damager = event.getDamager();
+        if (damager instanceof Player p) return p;
+        return null;
     }
 }
